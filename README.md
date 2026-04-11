@@ -302,10 +302,4 @@ Access metrics at: `http://localhost:8000/api/v1/metrics`
 
 This project is part of the CRM Digital FTE Factory Final Hackathon 5.
 
----
 
-## 🆘 Support
-
-For issues with this project, please open an issue on GitHub or contact the development team.
-
-**Built with**: Python 3.11, FastAPI, OpenAI Agents SDK, PostgreSQL, Kafka, Kubernetes
