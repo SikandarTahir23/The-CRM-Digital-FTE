@@ -416,7 +416,7 @@ def main():
         loop.run_until_complete(db_pool.close_pool())
         loop.close()
         print("[OK] Database connections closed")
-    except:
+    except Exception:
         pass
     
     print("\n[OK] Service stopped")

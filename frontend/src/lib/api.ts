@@ -67,40 +67,17 @@ export const ticketsApi = {
     return response.data;
   },
 
-  getStats: async () => {
-    const allTickets: any[] = [];
-    let page = 1;
-    const limit = 100;
-    let hasMore = true;
-
-    while (hasMore) {
-      const response = await api.get('/api/v1/tickets', {
-        params: { page, limit }
-      });
-      const tickets = response.data.tickets || [];
-      allTickets.push(...tickets);
-
-      hasMore = tickets.length === limit && page < (response.data.pagination?.pages || 0);
-      page++;
-
-      if (page > 50) break;
-    }
-
+  getStats: async (): Promise<TicketStats> => {
+    const response = await api.get('/api/v1/reports/overview');
+    const data = response.data;
     return {
-      total_tickets: allTickets.length,
-      open_tickets: allTickets.filter((t: any) => t.status === 'open').length,
-      resolved_tickets: allTickets.filter((t: any) => t.status === 'resolved').length,
-      escalated_tickets: allTickets.filter((t: any) => t.status === 'escalated').length,
+      total_tickets: data.total_tickets || 0,
+      open_tickets: data.open_tickets || 0,
+      resolved_tickets: data.resolved_tickets || 0,
+      escalated_tickets: data.escalated_tickets || 0,
       avg_response_time_hours: 2.5,
-      by_channel: {
-        email: allTickets.filter((t: any) => t.channel === 'email').length,
-        whatsapp: allTickets.filter((t: any) => t.channel === 'whatsapp').length,
-        web_form: allTickets.filter((t: any) => t.channel === 'web_form').length,
-      },
-      by_status: allTickets.reduce((acc: any, t: any) => {
-        acc[t.status] = (acc[t.status] || 0) + 1;
-        return acc;
-      }, {}),
+      by_channel: data.by_channel || {},
+      by_status: data.by_status || {},
     };
   },
 };

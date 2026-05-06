@@ -188,7 +188,7 @@ class EmailHandler:
             if mail:
                 try:
                     mail.logout()
-                except:
+                except Exception:
                     pass
             raise EmailReadError(f"Failed to fetch emails: {str(e)}")
     
@@ -294,7 +294,7 @@ class EmailHandler:
                             if payload:
                                 body = payload.decode(charset, errors="ignore")
                                 break
-                        except:
+                        except Exception:
                             continue
             else:
                 # Single part message
@@ -304,7 +304,7 @@ class EmailHandler:
                         payload = msg.get_payload(decode=True)
                         if payload:
                             body = payload.decode(charset, errors="ignore")
-                    except:
+                    except Exception:
                         pass
         except Exception as e:
             logger.error(f"Failed to extract email body: {e}")
@@ -336,9 +336,9 @@ class EmailHandler:
             if mail:
                 try:
                     mail.logout()
-                except:
+                except Exception:
                     pass
-    
+
     # =========================================================================
     # SMTP - Sending Emails
     # =========================================================================
@@ -579,7 +579,7 @@ class EmailHandler:
                 # Still mark as read to avoid infinite loop
                 try:
                     self.mark_as_read(email_data["email_id"])
-                except:
+                except Exception:
                     pass
 
         logger.info(f"Finished processing {processed} email(s)")

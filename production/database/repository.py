@@ -438,7 +438,7 @@ async def create_message(
             INSERT INTO messages (
                 message_id, conversation_id, channel, direction,
                 content, ticket_id, content_html, sentiment_score,
-                sentiment_confidence, in_reply_to, references, metadata
+                sentiment_confidence, in_reply_to, message_references, metadata
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             RETURNING *

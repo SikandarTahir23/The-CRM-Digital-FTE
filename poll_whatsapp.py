@@ -18,7 +18,7 @@ import traceback
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from datetime import datetime
-from src.channels.whatsapp_handler import WhatsAppHandler, get_whatsapp_metrics
+from src.channels.whatsapp_handler import WhatsAppHandler
 from production.config import settings
 from production.agent.customer_success_agent import run_agent_sync
 

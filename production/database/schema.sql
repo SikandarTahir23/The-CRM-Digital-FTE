@@ -155,6 +155,12 @@ CREATE TRIGGER update_customers_updated_at
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at_column();
 
+-- Trigger to auto-update updated_at on tickets table
+CREATE TRIGGER update_tickets_updated_at
+    BEFORE UPDATE ON tickets
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
 -- Insert initial ticket number counter
 CREATE TABLE IF NOT EXISTS ticket_counters (
     id SERIAL PRIMARY KEY,

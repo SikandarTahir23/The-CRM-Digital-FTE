@@ -8,9 +8,10 @@ Endpoints for:
 - Reports (analytics, metrics)
 - Health & Status
 """
-import os
 import sys
+import os
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ['PYTHONIOENCODING'] = 'utf-8'
 if sys.platform == 'win32':
     sys.stdout.reconfigure(encoding='utf-8')
@@ -22,7 +23,10 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from datetime import datetime, timedelta
+from contextlib import contextmanager
+from datetime import datetime, date, timedelta
+from decimal import Decimal
+from uuid import UUID
 from production.config import settings
 import logging
 
@@ -35,6 +39,33 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 
 def get_db_conn():
     return psycopg2.connect(settings.DATABASE_URL, sslmode='require')
+
+
+@contextmanager
+def db_cursor():
+    conn = get_db_conn()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            yield cur, conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def serialize_row(row):
+    """Convert a RealDictRow to JSON-safe dict."""
+    d = dict(row)
+    for k, v in d.items():
+        if isinstance(v, (datetime, date)):
+            d[k] = v.isoformat()
+        elif isinstance(v, Decimal):
+            d[k] = float(v)
+        elif isinstance(v, UUID):
+            d[k] = str(v)
+    return d
 
 
 # =============================================================================
@@ -61,12 +92,10 @@ async def get_tickets(
 ):
     """Get all tickets with filtering and pagination"""
     try:
-        conn = get_db_conn()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # Build query
+        with db_cursor() as (cur, conn):
             conditions = []
             params = []
-            
+
             if status:
                 conditions.append("status = %s")
                 params.append(status)
@@ -76,14 +105,12 @@ async def get_tickets(
             if priority:
                 conditions.append("priority = %s")
                 params.append(priority)
-            
+
             where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
-            
-            # Get total count
+
             cur.execute(f"SELECT COUNT(*) FROM tickets{where_clause}", params)
             total = cur.fetchone()['count']
-            
-            # Get tickets
+
             offset = (page - 1) * limit
             cur.execute(f"""
                 SELECT t.*, c.name as customer_name, c.email as customer_email
@@ -93,11 +120,9 @@ async def get_tickets(
                 ORDER BY t.created_at DESC
                 LIMIT %s OFFSET %s
             """, params + [limit, offset])
-            
-            tickets = [dict(row) for row in cur.fetchall()]
-        
-        conn.close()
-        
+
+            tickets = [serialize_row(row) for row in cur.fetchall()]
+
         return {
             "tickets": tickets,
             "pagination": {
@@ -116,8 +141,7 @@ async def get_tickets(
 async def get_ticket(ticket_id: str):
     """Get single ticket with details"""
     try:
-        conn = get_db_conn()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        with db_cursor() as (cur, conn):
             cur.execute("""
                 SELECT t.*, c.name as customer_name, c.email as customer_email,
                        c.phone_number, c.total_tickets, c.average_sentiment
@@ -125,24 +149,21 @@ async def get_ticket(ticket_id: str):
                 LEFT JOIN customers c ON c.id = t.customer_id
                 WHERE t.id = %s
             """, (ticket_id,))
-            
+
             ticket = cur.fetchone()
-            
+
             if not ticket:
                 raise HTTPException(status_code=404, detail="Ticket not found")
-            
-            # Get messages
+
             cur.execute("""
-                SELECT * FROM messages 
-                WHERE ticket_id = %s 
+                SELECT * FROM messages
+                WHERE ticket_id = %s
                 ORDER BY sent_at ASC
             """, (ticket_id,))
-            messages = [dict(row) for row in cur.fetchall()]
-        
-        conn.close()
-        
+            messages = [serialize_row(row) for row in cur.fetchall()]
+
         return {
-            "ticket": dict(ticket),
+            "ticket": serialize_row(ticket),
             "messages": messages
         }
     except HTTPException:
@@ -156,11 +177,10 @@ async def get_ticket(ticket_id: str):
 async def update_ticket(ticket_id: str, update: TicketUpdate):
     """Update ticket status, priority, or assignment"""
     try:
-        conn = get_db_conn()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        with db_cursor() as (cur, conn):
             updates = []
             params = []
-            
+
             if update.status:
                 updates.append("status = %s")
                 params.append(update.status)
@@ -170,25 +190,26 @@ async def update_ticket(ticket_id: str, update: TicketUpdate):
             if update.assigned_to:
                 updates.append("assigned_to = %s")
                 params.append(update.assigned_to)
-            
+
             if updates:
                 params.append(ticket_id)
                 cur.execute(f"""
-                    UPDATE tickets 
+                    UPDATE tickets
                     SET {', '.join(updates)}, updated_at = CURRENT_TIMESTAMP
                     WHERE id = %s
                     RETURNING *
                 """, params)
-                
                 ticket = cur.fetchone()
-                conn.commit()
             else:
                 cur.execute("SELECT * FROM tickets WHERE id = %s", (ticket_id,))
                 ticket = cur.fetchone()
-        
-        conn.close()
-        
-        return {"ticket": dict(ticket), "message": "Ticket updated"}
+
+        if not ticket:
+            raise HTTPException(status_code=404, detail="Ticket not found")
+
+        return {"ticket": serialize_row(ticket), "message": "Ticket updated"}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error updating ticket: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -206,9 +227,7 @@ async def get_customers(
 ):
     """Get all customers with search and pagination"""
     try:
-        conn = get_db_conn()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # Get total count first
+        with db_cursor() as (cur, conn):
             if search:
                 cur.execute("""
                     SELECT COUNT(*) FROM customers
@@ -219,7 +238,6 @@ async def get_customers(
 
             total = cur.fetchone()['count']
 
-            # Get customers
             if search:
                 cur.execute("""
                     SELECT * FROM customers
@@ -234,9 +252,7 @@ async def get_customers(
                     LIMIT %s OFFSET %s
                 """, (limit, (page - 1) * limit))
 
-            customers = [dict(row) for row in cur.fetchall()]
-
-        conn.close()
+            customers = [serialize_row(row) for row in cur.fetchall()]
 
         return {
             "customers": customers,
@@ -256,37 +272,31 @@ async def get_customers(
 async def get_customer(customer_id: str):
     """Get customer with full history"""
     try:
-        conn = get_db_conn()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # Get customer
+        with db_cursor() as (cur, conn):
             cur.execute("SELECT * FROM customers WHERE id = %s", (customer_id,))
             customer = cur.fetchone()
-            
+
             if not customer:
                 raise HTTPException(status_code=404, detail="Customer not found")
-            
-            # Get tickets
+
             cur.execute("""
-                SELECT * FROM tickets 
-                WHERE customer_id = %s 
-                ORDER BY created_at DESC 
+                SELECT * FROM tickets
+                WHERE customer_id = %s
+                ORDER BY created_at DESC
                 LIMIT 10
             """, (customer_id,))
-            tickets = [dict(row) for row in cur.fetchall()]
-            
-            # Get conversations
+            tickets = [serialize_row(row) for row in cur.fetchall()]
+
             cur.execute("""
-                SELECT * FROM conversations 
-                WHERE customer_id = %s 
-                ORDER BY opened_at DESC 
+                SELECT * FROM conversations
+                WHERE customer_id = %s
+                ORDER BY opened_at DESC
                 LIMIT 10
             """, (customer_id,))
-            conversations = [dict(row) for row in cur.fetchall()]
-        
-        conn.close()
-        
+            conversations = [serialize_row(row) for row in cur.fetchall()]
+
         return {
-            "customer": dict(customer),
+            "customer": serialize_row(customer),
             "tickets": tickets,
             "conversations": conversations
         }
@@ -305,46 +315,36 @@ async def get_customer(customer_id: str):
 async def get_overview():
     """Get overview statistics"""
     try:
-        conn = get_db_conn()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # Total tickets
+        with db_cursor() as (cur, conn):
             cur.execute("SELECT COUNT(*) FROM tickets")
             total_tickets = cur.fetchone()['count']
-            
-            # Open tickets
+
             cur.execute("SELECT COUNT(*) FROM tickets WHERE status = 'open'")
             open_tickets = cur.fetchone()['count']
-            
-            # Resolved tickets
+
             cur.execute("SELECT COUNT(*) FROM tickets WHERE status = 'resolved'")
             resolved_tickets = cur.fetchone()['count']
-            
-            # Escalated tickets
+
             cur.execute("SELECT COUNT(*) FROM tickets WHERE status = 'escalated'")
             escalated_tickets = cur.fetchone()['count']
-            
-            # Total customers
+
             cur.execute("SELECT COUNT(*) FROM customers")
             total_customers = cur.fetchone()['count']
-            
-            # Tickets by channel
+
             cur.execute("""
-                SELECT channel, COUNT(*) as count 
-                FROM tickets 
+                SELECT channel, COUNT(*) as count
+                FROM tickets
                 GROUP BY channel
             """)
             by_channel = {row['channel']: row['count'] for row in cur.fetchall()}
-            
-            # Tickets by status
+
             cur.execute("""
-                SELECT status, COUNT(*) as count 
-                FROM tickets 
+                SELECT status, COUNT(*) as count
+                FROM tickets
                 GROUP BY status
             """)
             by_status = {row['status']: row['count'] for row in cur.fetchall()}
-        
-        conn.close()
-        
+
         return {
             "total_tickets": total_tickets,
             "open_tickets": open_tickets,
@@ -363,64 +363,41 @@ async def get_overview():
 async def get_trends(days: int = Query(7, ge=1, le=30)):
     """Get ticket trends for last N days"""
     try:
-        conn = get_db_conn()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        with db_cursor() as (cur, conn):
             cur.execute("""
-                SELECT 
-                    DATE(created_at) as date,
-                    COUNT(*) as count,
-                    COUNT(*) FILTER (WHERE status = 'resolved') as resolved,
-                    COUNT(*) FILTER (WHERE status = 'escalated') as escalated
+                SELECT DATE(created_at) as date, COUNT(*) as count,
+                    COUNT(*) FILTER (WHERE status='resolved')  as resolved,
+                    COUNT(*) FILTER (WHERE status='escalated') as escalated
                 FROM tickets
-                WHERE created_at >= NOW() - INTERVAL '%s days'
-                GROUP BY DATE(created_at)
-                ORDER BY date ASC
+                WHERE created_at >= NOW() - make_interval(days => %s)
+                GROUP BY DATE(created_at) ORDER BY date ASC
             """, (days,))
-            
-            trends = [dict(row) for row in cur.fetchall()]
-            
-            # Convert date to string
-            for trend in trends:
-                trend['date'] = str(trend['date'])
-        
-        conn.close()
-        
+            trends = [serialize_row(r) for r in cur.fetchall()]
         return {"trends": trends, "days": days}
     except Exception as e:
         logger.error(f"Error getting trends: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return {"trends": [], "days": days}
 
 
 @app.get("/api/v1/reports/sentiment")
 async def get_sentiment():
     """Get sentiment analysis stats"""
     try:
-        conn = get_db_conn()
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        with db_cursor() as (cur, conn):
             cur.execute("""
-                SELECT 
-                    COUNT(*) as total,
-                    AVG(sentiment_score) as avg_score,
-                    COUNT(*) FILTER (WHERE sentiment_score < 0.3) as negative,
+                SELECT COUNT(*) as total,
+                    COALESCE(AVG(sentiment_score),0) as avg_score,
+                    COUNT(*) FILTER (WHERE sentiment_score < 0.3)  as negative,
                     COUNT(*) FILTER (WHERE sentiment_score BETWEEN 0.3 AND 0.7) as neutral,
-                    COUNT(*) FILTER (WHERE sentiment_score > 0.7) as positive
+                    COUNT(*) FILTER (WHERE sentiment_score > 0.7)  as positive
                 FROM ai_interactions
             """)
-            
-            stats = cur.fetchone()
-        
-        conn.close()
-        
-        return {
-            "total": stats['total'],
-            "average_score": float(stats['avg_score']) if stats['avg_score'] else 0,
-            "negative": stats['negative'],
-            "neutral": stats['neutral'],
-            "positive": stats['positive']
-        }
+            s = cur.fetchone()
+        return {"total": s['total'], "average_score": float(s['avg_score']),
+                "negative": s['negative'], "neutral": s['neutral'], "positive": s['positive']}
     except Exception as e:
         logger.error(f"Error getting sentiment: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return {"total": 0, "average_score": 0, "negative": 0, "neutral": 0, "positive": 0}
 
 
 # =============================================================================
@@ -431,12 +408,10 @@ async def get_sentiment():
 async def health_check():
     """Health check"""
     try:
-        conn = get_db_conn()
-        with conn.cursor() as cur:
+        with db_cursor() as (cur, conn):
             cur.execute("SELECT 1")
             cur.fetchone()
-        conn.close()
-        
+
         return {
             "status": "healthy",
             "database": "connected",

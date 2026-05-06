@@ -12,8 +12,10 @@ Features:
 - NO Unicode/emoji issues
 - Async operations handled via separate service module
 """
-import os
 import sys
+import os
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # Force UTF-8 encoding BEFORE any imports
 os.environ['PYTHONIOENCODING'] = 'utf-8'
@@ -51,10 +53,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize Kafka producer
+# Initialize Kafka producer (optional — system works without Kafka)
+kafka_producer = None
 try:
-    kafka_producer = init_kafka_producer(settings.KAFKA_BOOTSTRAP_SERVERS)
-    logger.info('Kafka producer initialized successfully')
+    if settings.KAFKA_BOOTSTRAP_SERVERS and settings.KAFKA_BOOTSTRAP_SERVERS != 'localhost:9092':
+        kafka_producer = init_kafka_producer(settings.KAFKA_BOOTSTRAP_SERVERS)
+        logger.info('Kafka producer initialized successfully')
+    else:
+        logger.info('Kafka not configured — running without event streaming')
 except Exception as e:
     logger.warning(f'Kafka producer initialization failed: {e}. Running without Kafka.')
     kafka_producer = None
@@ -140,75 +146,26 @@ class WebFormService:
     
     @staticmethod
     def process_with_ai(customer_email: str, subject: str, message_body: str) -> Dict[str, Any]:
-        """
-        Process message with AI agent in separate process.
-        Returns AI response data.
-        """
-        # Create a script to run in separate process
-        script = '''
-import sys
-import os
-import json
-sys.path.insert(0, '.')
-os.environ['PYTHONIOENCODING'] = 'utf-8'
-
-try:
-    import asyncio
-    from production.agent.customer_success_agent import process_customer_inquiry
-    
-    result = asyncio.run(process_customer_inquiry(
-        customer_email="{}",
-        subject="{}",
-        message_body="""{}"""
-    ))
-    
-    response = {{
-        "success": True,
-        "reply_text": result.reply_text,
-        "sentiment_score": float(result.sentiment_score),
-        "confidence_score": float(result.confidence_score),
-        "escalation_required": result.escalation_required,
-        "escalation_reason": result.escalation_reason or "",
-        "category": result.category,
-        "priority": result.priority
-    }}
-    print(json.dumps(response, ensure_ascii=False).encode('utf-8').decode('utf-8'))
-except Exception as e:
-    error_response = {{
-        "success": False,
-        "error": str(e),
-        "reply_text": "Thank you for contacting us. We will respond shortly.",
-        "sentiment_score": 0.75,
-        "confidence_score": 0.85,
-        "escalation_required": False,
-        "escalation_reason": "",
-        "category": "general",
-        "priority": "normal"
-    }}
-    print(json.dumps(error_response, ensure_ascii=False).encode('utf-8').decode('utf-8'))
-'''.format(
-    customer_email.replace('\\', '\\\\').replace('"', '\\"'),
-    subject.replace('\\', '\\\\').replace('"', '\\"'),
-    message_body.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
-)
-        
+        """Process message with AI agent directly."""
         try:
-            import subprocess
-            result = subprocess.run(
-                [sys.executable, '-c', script],
-                capture_output=True,
-                text=True,
-                timeout=60,
-                cwd='.',
-                env={**os.environ, 'PYTHONIOENCODING': 'utf-8'}
+            from production.agent.customer_success_agent import run_agent_sync
+
+            result = run_agent_sync(
+                customer_email=customer_email,
+                subject=subject,
+                message_body=message_body
             )
-            
-            if result.stdout.strip():
-                return json.loads(result.stdout)
-            else:
-                logger.warning(f"AI subprocess returned empty output. Stderr: {result.stderr}")
-                return WebFormService._get_fallback_response(subject)
-                
+
+            return {
+                "success": True,
+                "reply_text": result.reply_text,
+                "sentiment_score": float(result.sentiment_score),
+                "confidence_score": float(result.confidence_score),
+                "escalation_required": result.escalation_required,
+                "escalation_reason": result.escalation_reason or "",
+                "category": result.category,
+                "priority": result.priority
+            }
         except Exception as e:
             logger.error(f"AI processing error: {e}")
             return WebFormService._get_fallback_response(subject)
@@ -229,44 +186,20 @@ except Exception as e:
     
     @staticmethod
     def send_email(customer_email: str, subject: str, message_id: str, reply_text: str):
-        """Send email confirmation in separate process"""
-        script = '''
-import sys
-import os
-sys.path.insert(0, '.')
-os.environ['PYTHONIOENCODING'] = 'utf-8'
-
-try:
-    from src.channels.email_handler import EmailHandler
-    
-    handler = EmailHandler()
-    email_data = {{
-        "from": "{}",
-        "subject": "{}",
-        "message_id": "{}"
-    }}
-    
-    success = handler.send_reply(email_data, """{}""")
-    print(f"Email sent: {{success}}")
-except Exception as e:
-    print(f"Email error: {{e}}")
-'''.format(
-    customer_email.replace('\\', '\\\\').replace('"', '\\"'),
-    subject.replace('\\', '\\\\').replace('"', '\\"'),
-    message_id.replace('\\', '\\\\').replace('"', '\\"'),
-    reply_text.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
-)
-        
+        """Send email confirmation directly."""
         try:
-            import subprocess
-            result = subprocess.run(
-                [sys.executable, '-c', script],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                cwd='.'
-            )
-            logger.info(f"Email result: {result.stdout.strip()}")
+            from src.channels.email_handler import EmailHandler
+
+            handler = EmailHandler()
+            email_data = {
+                "from": customer_email,
+                "subject": subject,
+                "message_id": message_id,
+                "references": [],
+            }
+
+            success = handler.send_reply(email_data, reply_text)
+            logger.info(f"Email sent: {success}")
         except Exception as e:
             logger.error(f"Email sending error: {e}")
 
@@ -339,6 +272,8 @@ async def submit_webform(form_data: WebFormSubmit):
         total_time_ms = int((time.time() - start_time) * 1000)
         
         # STEP 7: Produce Kafka event for async processing
+        ticket_id = str(ticket['id'])
+        customer_id = str(db_records['customer']['id'])
         if kafka_producer:
             try:
                 # Produce incoming ticket event

@@ -142,8 +142,8 @@ class ServiceManager:
 def start_api_server():
     """Start API Server (Port 8002)"""
     import uvicorn
-    from production.api.main import app  # You'll need to create this
-    
+    from api_server import app
+
     logger.info("Starting API Server on port 8002...")
     uvicorn.run(app, host="0.0.0.0", port=8002, log_level="info")
 
@@ -160,73 +160,31 @@ def start_webform_api():
 def start_whatsapp_webhook():
     """Start WhatsApp Webhook (Port 8000)"""
     import uvicorn
-    from whatsapp_webhook_kafka import app
-    
+    from whatsapp_webhook_server import app
+
     logger.info("Starting WhatsApp Webhook on port 8000...")
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
 
 
 def start_email_polling():
-    """Start Email Polling Service"""
-    from src.channels.email_handler import EmailHandler
-    from production.database.repository import create_customer, create_conversation, create_ticket
-    from production.agent.customer_success_agent import run_agent_sync
+    """Start Email Polling Service using the standalone poll_emails module"""
     import time
-    
+
     logger.info("Starting Email Polling Service...")
-    
+
+    from src.channels.email_handler import EmailHandler
+    from poll_emails import process_single_email, init_database_sync
+
+    if not init_database_sync():
+        logger.error("Email polling: database init failed")
+        return
+
     handler = EmailHandler()
-    
-    def process_email(email_data):
-        """Process incoming email"""
-        try:
-            logger.info(f"Processing email from {email_data['from']}: {email_data['subject']}")
-            
-            # Create customer
-            customer = create_customer(email=email_data['from'])
-            
-            # Create conversation
-            conversation = create_conversation(
-                customer_id=customer['id'],
-                topic=email_data['subject']
-            )
-            
-            # Create ticket
-            ticket = create_ticket(
-                customer_id=customer['id'],
-                channel='email',
-                description=email_data['body'],
-                subject=email_data['subject'],
-                conversation_id=conversation['id']
-            )
-            
-            # Generate AI response
-            ai_response = run_agent_sync(
-                customer_email=email_data['from'],
-                subject=email_data['subject'],
-                message_body=email_data['body']
-            )
-            
-            # Send reply
-            handler.send_reply(email_data, ai_response.reply_text)
-            
-            logger.info(f"Email processed successfully. Ticket: {ticket['ticket_number']}")
-            
-            return {
-                'ticket_id': ticket['id'],
-                'sentiment_score': ai_response.sentiment_score,
-                'escalation_triggered': ai_response.escalation_required
-            }
-            
-        except Exception as e:
-            logger.error(f"Failed to process email: {e}")
-            return None
-    
-    # Poll emails
+
     while True:
         try:
-            handler.poll_emails(process_email)
-            time.sleep(60)  # Poll every 60 seconds
+            handler.poll_emails(process_single_email)
+            time.sleep(60)
         except Exception as e:
             logger.error(f"Email polling error: {e}")
             time.sleep(10)

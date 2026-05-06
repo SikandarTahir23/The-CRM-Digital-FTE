@@ -438,7 +438,7 @@ async def root():
         },
         "instructions": {
             "test": "POST to /test-webhook with {'message': 'hello'}",
-            "whapi_webhook": "Configure in Whapi dashboard: Settings → Webhooks → http://your-server:8000/whatsapp-webhook"
+            "whapi_webhook": "Configure in Whapi dashboard: Settings > Webhooks > http://your-server:8000/whatsapp-webhook"
         }
     }
 
